@@ -1,0 +1,29 @@
+name = "bulwark"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CACHE_TTL_SECONDS = "3600"
+BEDTIME_WAKE_HOUR = "7"
+STRIPE_WEBHOOK_SECRET = ""
+ENVIRONMENT = "development"
+
+# KV Namespaces
+# Create with: wrangler kv:namespace create BULWARK_KV
+# Then replace the placeholder id below
+[[kv_namespaces]]
+binding = "BULWARK_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+
+# Hyperdrive (Neon Postgres)
+# Create with: wrangler hyperdrive create bulwark-db --connection-string="postgres://..."
+# Then replace the placeholder id below
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "REPLACE_WITH_YOUR_HYPERDRIVE_ID"
+
+[dev]
+port = 8787
+local_protocol = "http"
