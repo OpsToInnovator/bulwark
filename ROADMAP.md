@@ -1,91 +1,79 @@
 # Bulwark — Roadmap
 
-> Living document. Phases are ordered by priority, not by calendar. Anything in 🟢 Done has shipped; 🟡 In Progress is actively being worked on; 🔵 Next is the queue; 🟣 Later is on the radar but not committed.
+> Living document. Reflects shipped state honestly. 🟢 Done is in the repo today; 🟡 In Progress is being actively worked on; 🔵 Next is the queued work; 🟣 Later is on the radar but not yet committed.
 
-## Phase 1 — Core proxy (foundations)
+## v1.0 — Core proxy (shipped)
 
-🟢 **Done**
-- Basic request proxying to OpenAI-compatible endpoints
-- Provider key management via env vars
-- Cloudflare Workers deployment via `wrangler`
-- Test harness with Vitest
+🟢 **All of the below is in `main` today and tested:**
 
-🟡 **In progress**
-- Anthropic adapter (parity with OpenAI adapter)
-- Reserved-vs-confirmed budget accounting (single-replica)
+- HTTP proxy on Cloudflare Workers (`wrangler dev` / `wrangler deploy`)
+- **OpenAI** adapter — `POST /v1/chat/completions`
+- **Anthropic** adapter — `POST /v1/messages`
+- **Gemini** adapter — `POST /v1beta/models/:model/generateContent` (passthrough)
+- Bulwark API key auth (`bwk_<keyId>_<secret>`) with SHA-256 hash verification
+- **Per-key daily + monthly USD caps** — 429 with `cap_exceeded` codes and `resets_at` timestamps
+- **Bedtime Mode** — timezone-aware sleeping-window block when today's spend ≥ 2× 7-day rolling baseline
+- `POST /v1/bedtime` toggle endpoint
+- **Exact-match KV cache** with canonical-key hashing; streaming requests bypass cache
+- **Pricing table** for OpenAI, Anthropic, Gemini with longest-prefix model matching
+- **Usage tracking** — KV hot counters + optional Hyperdrive/Neon Postgres for full records
+- **Anomaly flag** on usage records when projected daily spend > 3× baseline
+- **Tier system** — free / indie / team / pro with per-tier monthly request quotas and feature gates
+- **Stripe metered billing stub** — HMAC webhook validator complete, usage reporting wired (activates with `STRIPE_API_KEY`)
+- Test suite (`vitest`) covering pricing, caps, cache, bedtime — 53 tests passing as of last commit
+- AGPL-3.0 licensed
 
-🔵 **Next**
-- Gemini adapter
-- OpenRouter passthrough adapter
-- Per-key budgets with hard cap enforcement
-- Structured event emission to webhook
+## v1.1 — Operational hardening (next)
 
-## Phase 2 — Distributed state
+🟡 **In progress / 🔵 next:**
 
-🔵 **Next**
-- Redis-backed shared budget state for self-hosted deployments
-- Cloudflare KV / Durable Object backend for Workers deployments
-- Adapter-scoped cooldown keys (shared circuit-breaker state across replicas)
-- Reservation TTL handling on timeout
+- 🔵 **Reserved-vs-confirmed budget accounting** — replace the current read-before/write-after model with an explicit reservation step to bound concurrent-overspend windows. Likely implementation: per-key **Durable Object** acting as the single writer for budget state, with reservation TTLs to handle in-flight crashes. KV stays as the read-cache for the hot path.
+- 🔵 **Provider fallback chains** — configurable per key: on 429 / 5xx / timeout from primary, try the next provider in the chain. Respects `Retry-After` when honest.
+- 🔵 **Circuit breaker per provider** — track per-adapter health in shared state (DO or KV with TTL), jittered re-entry on recovery to avoid thundering herd.
+- 🔵 **Semantic cache** — embedding-based nearest-neighbour cache lookup for prompts where exact match is too strict. Already gated in tier config; needs an embedding model and a vector store (D1 + cosine, or Vectorize).
+- 🔵 **Webhook fan-out** — emit each usage record to a customer-configured webhook URL. Lets users wire Bulwark into their own observability stack without polling Postgres.
+- 🔵 **Anomaly alerts** — push the `anomalyFlag === true` records out via webhook + email/Slack on opt-in.
 
-🟣 **Later**
-- Read-through cache for budget state to reduce hot-key contention
-- Distributed lock benchmarks across Redis, KV, and DO backends
+## v1.2 — Billing and admin
 
-## Phase 3 — Caching
+🔵 **Next once v1.1 lands:**
 
-🔵 **Next**
-- Exact-match cache, keyed on (model, normalised messages, sampling params)
-- Per-route cache opt-in
+- Stripe full integration — flip the stub to live, batch usage reporting via Cron Trigger or DO timer.
+- Stripe webhook handler for subscription lifecycle (new customer → key provisioning, cancellation → key disable, dunning → soft warning headers).
+- Customer portal (Stripe-hosted first, Bulwark UI later).
+- Admin dashboard — read-only view of keys, current spend, recent usage. Workers + minimal HTML, no SPA framework.
+- Per-key dashboard for end users to see their own usage / set caps / toggle Bedtime.
 
-🟣 **Later**
-- Semantic cache with embedding + nearest-neighbour lookup
-- Cache invalidation on prompt-template change
-- Cache hit ratio telemetry
+## v1.3 — Pro tier features
 
-## Phase 4 — Fallback and reliability
+🟣 **Later:**
 
-🔵 **Next**
-- Configurable fallback chains per key
-- Circuit breaker per provider with jittered re-entry
-- Retry-After header honouring
+- **BYO Postgres** — customer-supplied connection string, full usage records routed to their database instead of Bulwark's. Already gated in tier config.
+- **SSO** — Workforce SSO via OIDC/SAML for the admin UI. Already gated in tier config.
+- **Multi-project support** — multiple keys under one ownerId with project-scoped budgets and roll-up reporting. Already gated in tier config.
+- **Audit log** — record every key creation, budget change, Bedtime toggle.
 
-🟣 **Later**
-- Cost-aware routing (cheaper fallback for non-critical workloads)
-- Latency-aware routing
-- Health-check probes for primary recovery
+## v2 — Beyond a single proxy
 
-## Phase 5 — Bedtime Mode and time-window controls
+🟣 **Later, not yet scoped:**
 
-🔵 **Next**
-- Time-window budget overrides with timezone support
-- Per-day-of-week budget profiles
-- Holiday calendar integration *(stretch)*
+- **Cost-aware routing** — if both providers can handle the request, prefer the cheaper one within a quality envelope.
+- **Latency-aware routing** — fall back from a slow provider to a faster one when p95 latency budget is at risk.
+- **Self-hosted multi-runtime** — port to Node.js + Docker for users who can't or won't deploy on Workers. Requires abstracting away `crypto.subtle`, KV, `ctx.waitUntil`, Hyperdrive.
+- **SDK helpers** — thin wrappers around OpenAI / Anthropic SDKs that pre-set `base_url` and `x-provider-key` from Bulwark config files. Optional, never required (the whole point is "no SDK changes needed").
+- **Bulwark Cloud** — managed hosted offering on top of the same open-source core. Same AGPL terms for self-hosters.
 
-## Phase 6 — Observability and admin
+## Explicitly out of scope
 
-🟣 **Later**
-- Admin UI (read-only first — keys, budgets, recent events)
-- Multi-tenant key management with workspaces
-- Audit log for budget changes
-- SDK helpers for Node and Python
+These come up periodically and the answer is no, with reasoning:
 
-## Phase 7 — Open core / hosted
+- **Running inference locally.** Bulwark is a proxy, not an inference server. Use llama.cpp / vLLM / Ollama for that and put Bulwark in front of them if needed.
+- **Prompt templating, versioning, or A/B testing.** Adjacent territory (Helicone, PromptLayer, others). Not Bulwark's lane.
+- **Built-in dashboards / charts as a primary feature.** Bulwark emits clean records; visualisation belongs in Grafana / Metabase / whatever you already use. The admin UI in v1.2 is operational, not analytical.
+- **Building an agentic IDE / agent runtime.** That's Velocity / Aider / Cursor / Open Velocity territory. Bulwark sits *in front of* those, enforcing budgets regardless of which agent is calling.
 
-🟣 **Later**
-- Hosted Bulwark Cloud — managed proxy with no infra setup
-- Enterprise SSO, RBAC, audit retention
-- The open-source core remains AGPL-3.0 and feature-complete for self-hosting
+## How to influence the roadmap
 
-## Out of scope (probably forever)
-
-- Running inference locally
-- Prompt versioning or templating
-- Built-in observability dashboards (we emit events; visualisation belongs elsewhere)
-- Building an agentic IDE — that's adjacent work, not Bulwark's lane
-
-## Contributing to the roadmap
-
-- Open a [Discussion](https://github.com/OpsToInnovator/bulwark/discussions) to propose a new item or argue a priority change
-- Open an [Issue](https://github.com/OpsToInnovator/bulwark/issues) once an item is concrete enough to scope
-- Items move from 🟣 → 🔵 → 🟡 → 🟢 based on what actually gets worked on, not what's planned
+- Open a [Discussion](https://github.com/OpsToInnovator/bulwark/discussions) to propose a new item, argue priority, or push back on something.
+- Open an [Issue](https://github.com/OpsToInnovator/bulwark/issues) when an item is concrete enough to scope and implement.
+- Items move 🟣 → 🔵 → 🟡 → 🟢 based on what actually gets shipped, not what's planned.
