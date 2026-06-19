@@ -1,0 +1,91 @@
+name: 🐛 Bug report
+description: Something in Bulwark behaves incorrectly
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more specific you can be, the faster I can fix it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the behaviour you saw.
+      placeholder: When I sent a request to /v1/chat/completions with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: I expected Bulwark to enforce the per-key budget and return 429...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Include curl commands or code if relevant.
+      placeholder: |
+        1. Start Bulwark with `MAX_COST_USD=0.01`
+        2. Send 5 concurrent requests to /v1/chat/completions
+        3. Observe...
+      render: bash
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Bulwark version / commit
+      placeholder: "e.g. main @ abc1234, or v0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Cloudflare Workers (wrangler dev)
+        - Cloudflare Workers (deployed)
+        - Node.js
+        - Docker
+        - Other (specify in details)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider involved
+      multiple: true
+      options:
+        - OpenAI
+        - Anthropic
+        - Gemini
+        - Multiple / fallback chain
+        - Not provider-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Redact any API keys or PII before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, config snippets, hypotheses about cause.
+    validations:
+      required: false

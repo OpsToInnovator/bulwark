@@ -1,0 +1,33 @@
+name: ❓ Question
+description: Not sure if it's a bug or a feature — ask here
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For open-ended discussion or design conversations, please use [Discussions](https://github.com/OpsToInnovator/bulwark/discussions) instead. Issues work best for concrete, answerable questions.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What's your question?
+      placeholder: Does Bulwark support per-key budgets when running behind a load balancer with multiple replicas?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to accomplish? What have you tried?
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you already checked?
+      description: README, DESIGN.md, existing issues, docs.
+    validations:
+      required: false

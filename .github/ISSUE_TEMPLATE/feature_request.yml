@@ -1,0 +1,54 @@
+name: ✨ Feature request
+description: Something you want Bulwark to do that it doesn't yet
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, check [open issues](https://github.com/OpsToInnovator/bulwark/issues) and [Discussions](https://github.com/OpsToInnovator/bulwark/discussions) — your idea may already be tracked.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the pain, not the feature. Helps me find the right solution.
+      placeholder: My team's AI bill spikes every Monday because...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What's your proposed solution?
+      description: Rough is fine. API shape, config option, behaviour change.
+      placeholder: A weekday-aware budget cap that resets at midnight in a configurable timezone...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other approaches and why they fell short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: How critical is this to your use case?
+      options:
+        - Nice-to-have
+        - Would meaningfully change how I use Bulwark
+        - Blocking my adoption
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Use case details, similar features in other tools, willingness to contribute.
+    validations:
+      required: false
