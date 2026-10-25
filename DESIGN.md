@@ -11,6 +11,7 @@ Bulwark is a drop-in HTTP proxy between your app and an LLM provider (OpenAI, An
 1. **Hard daily and monthly USD caps** per API key — request rejected with 429 once the cap is hit, until the window resets.
 2. **Bedtime Mode** — block requests during the key's configured sleeping window when today's spend has already hit 2× the rolling 7-day daily baseline. Stops a runaway overnight job from blowing the budget.
 3. **Exact-match caching** — deterministic requests return cached responses instead of paid completions, with a configurable TTL.
+4. **Attribution** — cost accounted per task, agent, workflow and tag, with per-task and per-agent caps and an outcome endpoint so spend can be read as cost per completed unit of work rather than a monthly total.
 
 ## Non-goals (today)
 
@@ -55,12 +56,25 @@ Your App ──Bearer bwk_<id>_<secret>──▶ ┌─────────�
 Implemented in `src/index.ts` → `proxyRequest()`:
 
 1. **Authenticate** — `auth.ts` parses `Bearer bwk_<keyId>_<secret>`, looks up the key record in KV (`apikey:{keyId}`), verifies the SHA-256 hash, and enforces the monthly request quota for the key's tier.
+1b. **Attribution parse** — `attribution.ts` reads `x-bulwark-task-id` / `-agent` / `-workflow` / `-tags` / `-task-cap-usd` (falling back to OpenAI `metadata` + `user`, Anthropic `metadata.user_id`). Invalid values return 400 `invalid_attribution`.
 2. **Spend caps** — `caps.ts` reads `spend:daily:{keyId}:{yyyymmdd}` and `spend:monthly:{keyId}:{yyyymm}`. If either ≥ the cap, return 429 with `daily_cap_exceeded` / `monthly_cap_exceeded` and the `resets_at` ISO timestamp.
+2b. **Task and agent caps** — `checkAttributionCaps()` reads the task ledger (`attr:task:{keyId}:{taskId}`) and today's agent aggregate. Effective task cap is header → cap stored on the ledger → key `defaultTaskCapUsd`. Either breach returns 429 (`task_cap_exceeded` / `agent_cap_exceeded`) before the upstream call.
 3. **Bedtime Mode** — `bedtime.ts` checks `record.bedtimeEnabled` (with a KV override at `bedtime:enabled:{keyId}`). If enabled AND the current time is in the key's sleeping window (timezone-aware, default 11pm–7am local) AND today's spend ≥ 2× the 7-day rolling baseline, return 429 with `bedtime_mode_active`.
 4. **Cache lookup** — `cache.ts` computes `SHA-256(provider + model + canonical-sorted body)`. Non-streaming requests check `cache:{hex}` in KV; on hit, return the stored response with `x-bulwark-cache: hit` and record a cache-hit usage row with `costUsd = 0`. Streaming requests skip cache entirely.
 5. **Forward to upstream** — provider-specific header building (`Authorization: Bearer ...` for OpenAI, `x-api-key` for Anthropic, `Authorization`/query-param for Gemini), then `fetch(upstreamUrl)` with the original body.
 6. **Parse usage** — `extractUsage()` reads `prompt_tokens` / `input_tokens` / `promptTokenCount` depending on provider. `pricing.ts` computes USD cost from the per-million-token table (`getModelPricing` does longest-prefix model matching so `gpt-4o-mini-2024-07-18` resolves to `gpt-4o-mini`).
-7. **Record usage** — `usage.ts` runs via `ctx.waitUntil()` (fire-and-forget): parallel writes to (a) `spend:daily`/`spend:monthly` counters, (b) the monthly request counter, (c) `usage:recent:{keyId}` rolling window of last 50 records, and (d) Postgres if Hyperdrive is bound. An `anomalyFlag` is set on the record when projected daily spend > 3× baseline.
+7. **Record usage** — `usage.ts` runs via `ctx.waitUntil()` (fire-and-forget): parallel writes to (a) `spend:daily`/`spend:monthly` counters, (b) the monthly request counter, (c) `usage:recent:{keyId}` rolling window of last 50 records, (d) the attribution ledger and daily aggregates when the request carried attribution, and (e) Postgres if Hyperdrive is bound. An `anomalyFlag` is set on the record when projected daily spend > 3× baseline.
+8. **Respond** — every response carries `x-bulwark-request-id` and `x-bulwark-cost-usd`; task-attributed responses also carry `x-bulwark-task-id` and `x-bulwark-task-spend-usd` (ledger total including this request) so callers can self-regulate.
+
+### Attribution model
+
+The unit of account is the **task** (an agent run, a job, a trace id), not the API key. Design choices:
+
+- **Headers first, body fallback.** Most agent frameworks already set OpenAI `metadata` or `user`; Bulwark picks those up so attribution works with zero header plumbing. Headers win when both are present.
+- **Ledger per task, aggregates per dimension.** `attr:task:{keyId}:{taskId}` holds the full ledger (requests, tokens, cost, cache hits, per-model and per-agent split, outcome). `attr:agg:{keyId}:{dimension}:{value}:{yyyymmdd}` holds daily totals for `agent`, `workflow`, `model` and `tag:{k}` so summaries are a prefix list, not a scan of records.
+- **Caps move to the unit of work.** A per-task cap bounds a single runaway loop without touching the key-wide budget that other tasks depend on. Per-agent daily caps bound a misbehaving role. Both use the same read-before/write-after accounting as the key caps, with the same bounded-overshoot tradeoff.
+- **Outcomes close the loop.** `POST /v1/attribution/tasks/:taskId/outcome` attaches `success | failure | abandoned` plus optional `value_usd`. The roll-up then reports cost per task, cost per successful task and value-to-cost ratio, which is the number finance teams ask for and almost no agent deployment can produce.
+- **Opt-in and inert when unused.** Requests with no attribution do one extra header parse and nothing else.
 
 ### Why post-hoc accounting, not reservations
 
@@ -151,6 +165,7 @@ The full record written per request (`UsageRecord` in `types.ts`, also the Postg
   latencyMs,
   timestamp,        // ISO-8601
   httpStatus,
+  taskId?, agent?, workflow?, tags?,   // attribution, when supplied
 }
 ```
 
@@ -172,3 +187,5 @@ No webhook emission today — records go to KV (recent window) and Postgres (ful
 - **Baseline** — rolling 7-day mean of daily USD spend for a key
 - **Anomaly flag** — set on a usage record when projected daily spend > 3× baseline
 - **Cap** — hard USD limit (daily or monthly) that returns 429 when reached
+- **Task** — the unit of work for attribution, identified by `x-bulwark-task-id`; has its own ledger and optional cap
+- **Outcome** — `success` / `failure` / `abandoned` recorded against a task, optionally with `value_usd`

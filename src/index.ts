@@ -5,10 +5,16 @@
 //   POST /v1/messages           → Anthropic messages proxy
 //   POST /v1beta/models/:model/generateContent → Gemini passthrough
 //   POST /v1/bedtime            → Toggle Bedtime Mode for authenticated key
+//   GET  /v1/attribution/tasks              → Recent tasks + ROI roll-up
+//   GET  /v1/attribution/tasks/:taskId      → One task ledger
+//   POST /v1/attribution/tasks/:taskId/outcome → Mark task success/failure (+ value)
+//   GET  /v1/attribution/summary?dimension=agent|workflow|model|tag:<k>&date=yyyymmdd
 //   GET  /health                → Health check (no auth)
 //
 // All proxy routes require Authorization: Bearer bwk_<keyId>_<secret>
 // Provider key passed via x-provider-key header (never stored).
+// Attribution headers (optional): x-bulwark-task-id, x-bulwark-agent,
+// x-bulwark-workflow, x-bulwark-tags, x-bulwark-task-cap-usd (see attribution.ts).
 
 import { Router, IRequest, error, json } from "itty-router";
 import { authenticate, incrementRequestCounter } from "./auth.js";
@@ -18,7 +24,23 @@ import { computeCacheKey, cacheGet, cachePut, isCacheable, CACHE_HEADER } from "
 import { calculateCost } from "./pricing.js";
 import { recordUsage, generateRequestId } from "./usage.js";
 import { Env, Provider } from "./types.js";
-import { getDailySpend } from "./caps.js";
+import { getDailySpend, utcDate } from "./caps.js";
+import {
+  Attribution,
+  TASK_HEADER,
+  TASK_SPEND_HEADER,
+  REQUEST_COST_HEADER,
+  parseAttribution,
+  checkAttributionCaps,
+  getTaskLedger,
+  listRecentTaskIds,
+  rollupTasks,
+  summarizeDimension,
+  recordTaskOutcome,
+  isTaskOutcome,
+  round8,
+} from "./attribution.js";
+import { writeTaskOutcomeToPostgres } from "./usage.js";
 
 const router = Router<IRequest, [Env, ExecutionContext]>();
 
@@ -46,6 +68,101 @@ router.post("/v1/bedtime", async (req, env: Env) => {
 
   await setBedtimeEnabled(auth.record.keyId, body.enabled, env);
   return json({ ok: true, bedtime_enabled: body.enabled });
+});
+
+// ─── Attribution read + outcome endpoints ────────────────────────────────────
+
+router.get("/v1/attribution/tasks", async (req, env: Env) => {
+  const auth = await authenticate(req, env);
+  if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  const limit = clampInt(req.query["limit"], 1, 200, 50);
+  const ids = (await listRecentTaskIds(auth.record.keyId, env)).slice(0, limit);
+  const ledgers = (await Promise.all(ids.map((id) => getTaskLedger(auth.record.keyId, id, env))))
+    .filter((l): l is NonNullable<typeof l> => l !== null);
+
+  return json({ rollup: rollupTasks(ledgers), tasks: ledgers });
+});
+
+router.get("/v1/attribution/tasks/:taskId", async (req, env: Env) => {
+  const auth = await authenticate(req, env);
+  if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  const taskId = req.params["taskId"] ?? "";
+  const ledger = await getTaskLedger(auth.record.keyId, taskId, env);
+  if (!ledger) return errorResponse(404, "task_not_found", "No usage recorded for that task id.");
+  return json(ledger);
+});
+
+router.post("/v1/attribution/tasks/:taskId/outcome", async (req, env: Env, ctx: ExecutionContext) => {
+  const auth = await authenticate(req, env);
+  if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  let body: { outcome?: unknown; value_usd?: unknown; note?: unknown };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return errorResponse(400, "invalid_json", 'Body must be JSON: { outcome: "success"|"failure"|"abandoned", value_usd?: number, note?: string }.');
+  }
+  if (!isTaskOutcome(body.outcome)) {
+    return errorResponse(400, "invalid_outcome", '`outcome` must be "success", "failure" or "abandoned".');
+  }
+  if (body.value_usd !== undefined && (typeof body.value_usd !== "number" || !Number.isFinite(body.value_usd) || body.value_usd < 0)) {
+    return errorResponse(400, "invalid_value", "`value_usd` must be a non-negative number.");
+  }
+  if (body.note !== undefined && typeof body.note !== "string") {
+    return errorResponse(400, "invalid_note", "`note` must be a string.");
+  }
+
+  const ledger = await recordTaskOutcome(
+    auth.record.keyId,
+    req.params["taskId"] ?? "",
+    { outcome: body.outcome, valueUsd: body.value_usd as number | undefined, note: body.note as string | undefined },
+    env,
+  );
+  if (!ledger) return errorResponse(404, "task_not_found", "No usage recorded for that task id.");
+
+  ctx.waitUntil(
+    writeTaskOutcomeToPostgres(
+      {
+        keyId: ledger.keyId,
+        taskId: ledger.taskId,
+        outcome: ledger.outcome!,
+        valueUsd: ledger.valueUsd,
+        note: ledger.outcomeNote,
+        costUsd: ledger.costUsd,
+        requests: ledger.requests,
+        recordedAt: ledger.outcomeAt!,
+      },
+      env,
+    ),
+  );
+
+  return json({
+    ok: true,
+    task_id: ledger.taskId,
+    outcome: ledger.outcome,
+    cost_usd: ledger.costUsd,
+    value_usd: ledger.valueUsd ?? null,
+    value_to_cost_ratio:
+      ledger.valueUsd !== undefined && ledger.costUsd > 0 ? round8(ledger.valueUsd / ledger.costUsd) : null,
+  });
+});
+
+router.get("/v1/attribution/summary", async (req, env: Env) => {
+  const auth = await authenticate(req, env);
+  if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  const dimension = String(req.query["dimension"] ?? "agent");
+  if (!/^(agent|workflow|model|tag:[A-Za-z0-9_-]{1,32})$/.test(dimension)) {
+    return errorResponse(400, "invalid_dimension", "dimension must be agent, workflow, model or tag:<key>.");
+  }
+  const date = String(req.query["date"] ?? utcDate());
+  if (!/^\d{8}$/.test(date)) {
+    return errorResponse(400, "invalid_date", "date must be yyyymmdd (UTC).");
+  }
+
+  return json(await summarizeDimension(auth.record.keyId, dimension, date, env));
 });
 
 // ─── OpenAI proxy ─────────────────────────────────────────────────────────────
@@ -101,6 +218,11 @@ async function proxyRequest(
 
   const model = extractModel(provider, bodyObj);
 
+  // 2b. Parse attribution (task / agent / workflow / tags)
+  const parsed = parseAttribution(req.headers, bodyObj, provider);
+  if (!parsed.ok) return errorResponse(400, "invalid_attribution", parsed.message);
+  const attribution: Attribution = parsed.attribution;
+
   // 3. Check spend caps
   const capsResult = await checkCaps(record, env);
   if (!capsResult.allowed) {
@@ -110,6 +232,18 @@ async function proxyRequest(
       resets_at: capsResult.resetAt,
     });
   }
+
+  // 3b. Check per-task and per-agent caps
+  const attrResult = await checkAttributionCaps(record.keyId, attribution, record, env);
+  if (!attrResult.allowed) {
+    return errorResponse(attrResult.status, attrResult.code, attrResult.message, {
+      cap_usd: attrResult.capUsd,
+      spent_usd: attrResult.spentUsd,
+      task_id: attrResult.taskId,
+      agent: attrResult.agent,
+    });
+  }
+  const taskSpendBefore = attrResult.ledger?.costUsd ?? 0;
 
   // 4. Check Bedtime Mode
   const dailySpend = await getDailySpend(record.keyId, env);
@@ -143,11 +277,15 @@ async function proxyRequest(
             cacheHit: true,
             latencyMs: Date.now() - startMs,
             httpStatus: 200,
+            attribution,
           },
           env,
         ),
       );
-      return cached;
+      const cachedHeaders = new Headers(cached.headers);
+      cachedHeaders.set("x-bulwark-request-id", requestId);
+      setAttributionHeaders(cachedHeaders, attribution, 0, taskSpendBefore);
+      return new Response(cached.body, { status: cached.status, headers: cachedHeaders });
     }
   }
 
@@ -210,6 +348,7 @@ async function proxyRequest(
           cacheHit: false,
           latencyMs,
           httpStatus: upstreamResponse.status,
+          attribution,
         },
         env,
       ),
@@ -218,6 +357,7 @@ async function proxyRequest(
     const responseHeaders = new Headers(upstreamResponse.headers);
     responseHeaders.set(CACHE_HEADER, "miss");
     responseHeaders.set("x-bulwark-request-id", requestId);
+    setAttributionHeaders(responseHeaders, attribution, costUsd, taskSpendBefore);
 
     return new Response(responseBody ? JSON.stringify(responseBody) : null, {
       status: upstreamResponse.status,
@@ -240,18 +380,38 @@ async function proxyRequest(
         cacheHit: false,
         latencyMs,
         httpStatus: upstreamResponse.status,
+        attribution,
       },
       env,
     ),
   );
 
-  return new Response(errText, {
-    status: upstreamResponse.status,
-    headers: {
-      "Content-Type": upstreamResponse.headers.get("Content-Type") ?? "application/json",
-      "x-bulwark-request-id": requestId,
-    },
+  const errHeaders = new Headers({
+    "Content-Type": upstreamResponse.headers.get("Content-Type") ?? "application/json",
+    "x-bulwark-request-id": requestId,
   });
+  setAttributionHeaders(errHeaders, attribution, 0, taskSpendBefore);
+  return new Response(errText, { status: upstreamResponse.status, headers: errHeaders });
+}
+
+/** Echo task id and running task spend so agents can self-regulate mid-run. */
+function setAttributionHeaders(
+  headers: Headers,
+  attribution: Attribution,
+  requestCostUsd: number,
+  taskSpendBeforeUsd: number,
+): void {
+  headers.set(REQUEST_COST_HEADER, requestCostUsd.toFixed(8));
+  if (attribution.taskId) {
+    headers.set(TASK_HEADER, attribution.taskId);
+    headers.set(TASK_SPEND_HEADER, round8(taskSpendBeforeUsd + requestCostUsd).toFixed(8));
+  }
+}
+
+function clampInt(raw: unknown, min: number, max: number, fallback: number): number {
+  const n = parseInt(String(raw ?? ""), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 // ─── Provider-specific helpers ────────────────────────────────────────────────

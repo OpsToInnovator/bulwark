@@ -34,6 +34,7 @@ That's the whole integration. Now you get:
 - **Bedtime Mode** — auto-block during sleeping hours if today's spend already hit 2× your 7-day baseline
 - **Exact-match caching** — repeated prompts return cached responses, free
 - **Anomaly flag** — usage records flagged when projected spend > 3× baseline
+- **Attribution** — cost per task, agent, workflow and tag, with per-task and per-agent caps and cost-per-outcome roll-ups
 - **Provider-agnostic** — OpenAI, Anthropic, Gemini today
 
 What it looks like when a cap trips:
@@ -49,6 +50,50 @@ x-bulwark-cap-type: daily
   "resets_at": "2026-06-20T00:00:00Z"
 }
 ```
+
+---
+
+## Attribution: cost per task, agent and outcome
+
+Caps answer "how much can this key spend?". Attribution answers "what did each unit of work cost, and was it worth it?". Agent spend is decisions, not seats, so Bulwark accounts at the task level.
+
+Tag any proxied request with optional headers (or the OpenAI `metadata` / `user` body fields, which most agent frameworks already set):
+
+```python
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[...],
+    extra_headers={
+        "x-bulwark-task-id": "run_8f3a",        # the unit of work (agent run, job, trace)
+        "x-bulwark-agent": "researcher",        # which agent / role is calling
+        "x-bulwark-workflow": "lead-enrichment",
+        "x-bulwark-tags": "team=growth,env=prod",
+        "x-bulwark-task-cap-usd": "2.00",       # hard cap for this task only
+    },
+)
+```
+
+Every response carries `x-bulwark-cost-usd` (this request) and, when a task id is present, `x-bulwark-task-spend-usd` (running total), so an agent can self-regulate mid-run.
+
+When a task reaches its cap you get a `429` with `task_cap_exceeded` and the upstream call is never made. Other tasks on the same key are unaffected. Per-agent daily caps can also be set on the key record (`agentDailyCapsUsd: { "scraper": 5 }`) and return `agent_cap_exceeded`. A key-wide `defaultTaskCapUsd` applies to any task that does not send its own cap.
+
+Close the loop by recording what the task produced:
+
+```bash
+curl -X POST https://api.yourdomain.com/v1/attribution/tasks/run_8f3a/outcome \
+  -H "Authorization: Bearer bwk_..." -H "Content-Type: application/json" \
+  -d '{ "outcome": "success", "value_usd": 40, "note": "lead qualified" }'
+```
+
+Then read it back:
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/attribution/tasks/:taskId` | Full task ledger: requests, tokens, cost, cache hits, per-model and per-agent split, outcome |
+| `GET /v1/attribution/tasks?limit=50` | Recent tasks plus a roll-up: success rate, cost per task, cost per successful task, cache hit rate, value-to-cost ratio |
+| `GET /v1/attribution/summary?dimension=agent&date=20260101` | Daily cost ranked by `agent`, `workflow`, `model` or `tag:<key>`, with share of spend and cache hit rate |
+
+Attribution is optional. Requests without any of these headers behave exactly as before. Values are limited to 64 characters of `A-Z a-z 0-9 . _ : / @ -`; up to 8 tags per request.
 
 ---
 
@@ -309,6 +354,9 @@ Test coverage:
 | `bedtime:days:{keyId}` | JSON array of last 7 daily totals | 90 days |
 | `cache:{sha256hex}` | cached response JSON | `CACHE_TTL_SECONDS` (default 3600s) |
 | `usage:recent:{keyId}` | last 50 `UsageRecord` JSON | 7 days |
+| `attr:task:{keyId}:{taskId}` | `TaskLedger` JSON (cost, tokens, outcome) | 30 days |
+| `attr:tasks:recent:{keyId}` | JSON array of last 200 task ids | 30 days |
+| `attr:agg:{keyId}:{dimension}:{value}:{yyyymmdd}` | daily `DailyAggregate` JSON; dimension is `agent`, `workflow`, `model` or `tag:{k}` | 35 days |
 
 ---
 
