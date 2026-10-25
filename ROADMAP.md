@@ -23,7 +23,19 @@
 - Test suite (`vitest`) covering pricing, caps, cache, bedtime — 53 tests passing as of last commit
 - AGPL-3.0 licensed
 
-## v1.1 — Operational hardening (next)
+## v1.1 — Attribution layer (in review)
+
+🟡 **Implemented and tested (87 tests passing); lands in `main` when the PR merges:**
+
+- **Task / agent / workflow / tag attribution** via `x-bulwark-*` headers, with fallback to OpenAI `metadata` + `user` and Anthropic `metadata.user_id`
+- **Per-task hard cap** (`x-bulwark-task-cap-usd`, or key-level `defaultTaskCapUsd`) — `429 task_cap_exceeded`; one runaway loop can no longer drain the key's daily budget
+- **Per-agent daily caps** on the key record (`agentDailyCapsUsd`) — `429 agent_cap_exceeded`
+- **Response headers** `x-bulwark-cost-usd` and `x-bulwark-task-spend-usd` so agents can self-regulate mid-run
+- **Task ledgers** (`attr:task:*`) and **daily aggregates** per agent / workflow / model / tag (`attr:agg:*`)
+- **Outcome endpoint** — mark a task `success` / `failure` / `abandoned` with optional `value_usd`; roll-ups report success rate, cost per task, cost per success and value-to-cost ratio
+- Postgres rows extended with `task_id`, `agent`, `workflow`, `tags`; new `task_outcomes` table (see `usage.ts` for the migration)
+
+## v1.2 — Operational hardening (next)
 
 🟡 **In progress / 🔵 next:**
 
@@ -34,9 +46,9 @@
 - 🔵 **Webhook fan-out** — emit each usage record to a customer-configured webhook URL. Lets users wire Bulwark into their own observability stack without polling Postgres.
 - 🔵 **Anomaly alerts** — push the `anomalyFlag === true` records out via webhook + email/Slack on opt-in.
 
-## v1.2 — Billing and admin
+## v1.3 — Billing and admin
 
-🔵 **Next once v1.1 lands:**
+🔵 **Next once v1.2 lands:**
 
 - Stripe full integration — flip the stub to live, batch usage reporting via Cron Trigger or DO timer.
 - Stripe webhook handler for subscription lifecycle (new customer → key provisioning, cancellation → key disable, dunning → soft warning headers).
@@ -44,13 +56,15 @@
 - Admin dashboard — read-only view of keys, current spend, recent usage. Workers + minimal HTML, no SPA framework.
 - Per-key dashboard for end users to see their own usage / set caps / toggle Bedtime.
 
-## v1.3 — Pro tier features
+## v1.4 — Pro tier features
 
 🟣 **Later:**
 
 - **BYO Postgres** — customer-supplied connection string, full usage records routed to their database instead of Bulwark's. Already gated in tier config.
 - **SSO** — Workforce SSO via OIDC/SAML for the admin UI. Already gated in tier config.
 - **Multi-project support** — multiple keys under one ownerId with project-scoped budgets and roll-up reporting. Already gated in tier config.
+- **Attribution over time** — multi-day summaries and per-task cost trend from Postgres (KV aggregates are daily only today).
+- **Outcome webhooks** — emit task outcomes alongside usage records so finance tooling can price work by result.
 - **Audit log** — record every key creation, budget change, Bedtime toggle.
 
 ## v2 — Beyond a single proxy
