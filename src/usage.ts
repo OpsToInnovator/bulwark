@@ -3,8 +3,8 @@
 // Every proxied request generates a UsageRecord.
 //
 // Write path:
-//   1. Sync: update KV hot counters (daily/monthly spend, request count, baseline)
-//   2. Async (fire-and-forget): write full record to Postgres via Hyperdrive
+//   1. Update KV hot counters (daily/monthly spend, request count, baseline)
+//   2. Write the full record to Postgres via Hyperdrive
 //
 // If HYPERDRIVE binding is absent (local dev, or not yet configured) the Postgres
 // write is silently skipped — KV counters still work.
