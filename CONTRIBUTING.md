@@ -10,8 +10,12 @@ This doc covers how to get the project running locally, how to open a useful iss
 
 - **Node.js** v20+
 - **npm** v10+
-- A **Cloudflare Workers** account (Bulwark runs on Workers via `wrangler`)
+- **PostgreSQL** — `wrangler dev` will not start without one (see below)
 - API keys for at least one LLM provider you want to proxy (OpenAI, Anthropic, Gemini)
+
+You do not need a Cloudflare account to develop locally. `wrangler dev` runs the
+Worker in a local runtime, and the placeholder KV and Hyperdrive ids in
+`wrangler.toml` are fine there. You only need an account to `npm run deploy`.
 
 ### Local setup
 
@@ -19,11 +23,76 @@ This doc covers how to get the project running locally, how to open a useful iss
 git clone https://github.com/OpsToInnovator/bulwark.git
 cd bulwark
 npm install
-cp .dev.vars.example .dev.vars   # add your provider keys here
-npx wrangler dev
+cp .dev.vars.example .dev.vars   # only needed if you are touching billing
 ```
 
-The proxy will start on `http://localhost:8787` by default. Point your LLM client at that URL instead of `api.openai.com` / `api.anthropic.com` / etc.
+`wrangler.toml` declares a Hyperdrive binding, so `wrangler dev` refuses to boot
+until you point it at a local Postgres. Create a database, apply the schema, and
+export the connection string:
+
+```bash
+createdb bulwark   # on a stock Debian/Ubuntu install: sudo -u postgres createdb -O "$USER" bulwark
+psql bulwark -c '
+  CREATE TABLE IF NOT EXISTS usage_records (
+    request_id        TEXT PRIMARY KEY,
+    key_id            TEXT NOT NULL,
+    provider          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_tokens     INT  NOT NULL,
+    completion_tokens INT  NOT NULL,
+    cost_usd          NUMERIC(12,8) NOT NULL,
+    cache_hit         BOOLEAN NOT NULL,
+    anomaly_flag      BOOLEAN NOT NULL,
+    latency_ms        INT NOT NULL,
+    timestamp         TIMESTAMPTZ NOT NULL,
+    http_status       INT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS usage_records_key_id_timestamp
+    ON usage_records(key_id, timestamp DESC);'
+
+export WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgres://localhost:5432/bulwark"
+npm run dev
+```
+
+On wrangler v4 that variable is named `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`.
+
+The proxy starts on `http://localhost:8787`. Point your LLM client at that URL
+instead of `api.openai.com` / `api.anthropic.com` / etc.
+
+### Making your first request
+
+Every proxy route needs a Bulwark key, which lives in KV — a fresh clone has
+none, so requests 401 until you seed one. Keys are `bwk_<keyId>_<secret>` and KV
+stores the SHA-256 of the whole string under `apikey:<keyId>`:
+
+```bash
+KEY_ID=devkey01
+SECRET=$(openssl rand -hex 12)
+KEY="bwk_${KEY_ID}_${SECRET}"
+HASH=$(printf '%s' "$KEY" | openssl dgst -sha256 -hex | awk '{print $NF}')
+
+npx wrangler kv key put --binding BULWARK_KV --local --preview "apikey:${KEY_ID}" "$(cat <<EOF
+{"keyId":"${KEY_ID}","keyHash":"${HASH}","ownerId":"dev","tier":"free",
+ "dailyCapUsd":5,"monthlyCapUsd":50,"bedtimeEnabled":false,"wakeHour":7,
+ "timezone":"UTC","createdAt":"$(date -u +%FT%TZ)","active":true}
+EOF
+)"
+echo "$KEY"
+```
+
+`--preview` matters: `wrangler dev` reads the `preview_id` namespace, so a key
+written without it is invisible to the dev server.
+
+Then call the proxy, passing your own provider key through. Bulwark never stores
+it — it is read from the `x-provider-key` header per request and forwarded:
+
+```bash
+curl http://localhost:8787/v1/chat/completions \
+  -H "authorization: Bearer $KEY" \
+  -H "x-provider-key: $OPENAI_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+```
 
 ### Running tests
 
@@ -54,7 +123,7 @@ Good issues include: what you expected, what happened, how to reproduce, your Bu
 
 1. **Open or comment on an issue first** for non-trivial changes — saves us both time
 2. Fork, branch off `main` with a descriptive name (`feat/per-key-budgets`, `fix/anthropic-429-retry`)
-3. Make the change, add tests, run `npm test` and `npm run lint`
+3. Make the change, add tests, run `npm test` and `npm run type-check`
 4. Open the PR with a clear description: what changed, why, and how to verify
 5. Link the issue in the PR description (`Closes #123`)
 
