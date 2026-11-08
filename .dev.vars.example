@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local development. .dev.vars is gitignored.
+#
+# Provider API keys do NOT belong here. Bulwark never stores them — callers
+# pass their own key per request in the x-provider-key header.
+#
+# Values here override the [vars] block in wrangler.toml for `wrangler dev`.
+
+# Signing secret for the Stripe webhook at POST /webhooks/stripe.
+# Only needed if you are working on billing. Leave blank otherwise.
+STRIPE_WEBHOOK_SECRET=

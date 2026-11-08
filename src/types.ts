@@ -2,6 +2,8 @@
 
 export type Tier = "free" | "indie" | "team" | "pro";
 
+export type Provider = "openai" | "anthropic" | "gemini";
+
 export interface TierConfig {
   monthlyRequestLimit: number; // 0 = unlimited
   logRetentionDays: number;
@@ -36,7 +38,7 @@ export interface BulwarkKeyRecord {
 export interface UsageRecord {
   requestId: string;
   keyId: string;
-  provider: "openai" | "anthropic" | "gemini";
+  provider: Provider;
   model: string;
   promptTokens: number;
   completionTokens: number;

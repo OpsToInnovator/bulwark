@@ -63,8 +63,9 @@ export async function recordUsage(input: RecordUsageInput, env: Env): Promise<vo
     storeRecentUsage(record, env),
   ]);
 
-  // Postgres write (non-blocking)
-  writeToPostgres(record, env).catch((err) => {
+  // Awaited so the caller's ctx.waitUntil covers the write. Left un-awaited the
+  // promise escapes waitUntil and the isolate is torn down before it settles.
+  await writeToPostgres(record, env).catch((err) => {
     console.error("[bulwark/usage] Postgres write failed:", err);
   });
 }
@@ -107,20 +108,9 @@ async function storeRecentUsage(record: UsageRecord, env: Env): Promise<void> {
 async function writeToPostgres(record: UsageRecord, env: Env): Promise<void> {
   if (!env.HYPERDRIVE) return; // Graceful no-op
 
-  // Hyperdrive exposes a connectionString; use fetch to the Hyperdrive endpoint
-  // In practice you'd use a Postgres client. Here we use a raw SQL query via
-  // the Hyperdrive REST-like interface using the Workers Postgres driver pattern.
-  // NOTE: @neondatabase/serverless or postgres.js can be used with Hyperdrive.
-  // This stub uses dynamic import for the optional dependency.
   try {
-    // Dynamic import allows tree-shaking when not deployed with Hyperdrive
-    const { Client } = await import("@neondatabase/serverless" as string) as {
-      Client: new (config: { connectionString: string }) => {
-        connect(): Promise<void>;
-        query(sql: string, params: unknown[]): Promise<unknown>;
-        end(): Promise<void>;
-      };
-    };
+    // Dynamic import keeps the driver out of the bundle when Hyperdrive is unbound.
+    const { Client } = await import("pg");
     const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
     await client.connect();
     await client.query(
